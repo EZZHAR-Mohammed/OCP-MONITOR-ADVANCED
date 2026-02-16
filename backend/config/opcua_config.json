@@ -1,0 +1,6 @@
+{
+  "endpoint": "opc.tcp://localhost:53530/OPCUA/SimulationServer",
+  "security": "None",
+  "username": "",
+  "password": ""
+}
