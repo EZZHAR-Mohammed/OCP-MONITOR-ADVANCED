@@ -37,9 +37,9 @@ The system follows a modular architecture composed of:
 - OPC UA (Client)
 - FastAPI
 - WebSocket
-- SQLite / PostgreSQL
-- JavaScript (Frontend)
-- HTML / CSS
+- XAMPP MYSQL
+- 
+- 
 
 ---
 
