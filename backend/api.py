@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import contextmanager
 import mysql.connector
 from mysql.connector import Error
@@ -10,49 +11,73 @@ app = FastAPI(
     description="API pour consulter les données OPC UA collectées et stockées dans MySQL"
 )
 
-# Configuration de la base de données
-# À terme : déplacer ces valeurs dans un fichier .env + python-dotenv
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*", "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Clients WebSocket
+active_connections: List[WebSocket] = []
+
+async def broadcast(message: dict):
+    disconnected = []
+    for connection in active_connections:
+        try:
+            await connection.send_json(message)
+        except Exception:
+            disconnected.append(connection)
+    for conn in disconnected:
+        active_connections.remove(conn)
+    print(f"Broadcast envoyé à {len(active_connections)} clients : {message.get('type')}")
+
+# ROUTE WEBSOCKET – OBLIGATOIRE
+@app.websocket("/ws/measurements")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
+    print("Nouveau client WebSocket connecté")
+    try:
+        latest = get_latest_measurements(50)
+        print(f"Envoi initial : {len(latest)} mesures")
+        await websocket.send_json({"type": "initial", "data": latest})
+
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+        print("Client WebSocket déconnecté")
+    except Exception as e:
+        print(f"Erreur WebSocket : {e}")
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+
+# DB config
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "",                 # mets ton mot de passe si tu en as un
-    "database": "opcua_monitor"     # vérifie que c'est bien le nom exact
+    "password": "",
+    "database": "opcua_monitor"
 }
 
 @contextmanager
 def get_db():
-    """Gestionnaire de contexte pour la connexion MySQL"""
     conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         yield conn
     except Error as e:
-        raise HTTPException(status_code=500, detail=f"Erreur de connexion à la base : {str(e)}")
+        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
     finally:
         if conn and conn.is_connected():
             conn.close()
 
-
-# ────────────────────────────────────────────────
-# Route racine (accueil de l'API)
-# ────────────────────────────────────────────────
 @app.get("/")
 def read_root():
-    return {
-        "message": "Bienvenue sur l'API OCP Monitor !",
-        "docs": "Va sur /docs pour voir la documentation interactive (Swagger)",
-        "endpoints": [
-            "/nodes → Liste des nœuds OPC UA surveillés",
-            "/measurements/latest → Dernières mesures (tous nœuds)",
-            "/measurements/{node_id} → Historique des mesures pour un nœud spécifique"
-        ],
-        "status": "API opérationnelle"
-    }
+    return {"message": "Bienvenue sur l'API OCP Monitor !", "docs": "/docs"}
 
-
-# ────────────────────────────────────────────────
-# Liste de tous les nœuds
-# ────────────────────────────────────────────────
 @app.get("/nodes", response_model=List[Dict])
 def get_nodes():
     with get_db() as conn:
@@ -60,70 +85,45 @@ def get_nodes():
         cur.execute("SELECT * FROM nodes ORDER BY id")
         return cur.fetchall()
 
-
-# ────────────────────────────────────────────────
-# Dernières mesures (tous nœuds)
-# ────────────────────────────────────────────────
 @app.get("/measurements/latest", response_model=List[Dict])
 def get_latest_measurements(limit: int = 50):
-    """
-    Retourne les N dernières mesures (par défaut 50),
-    triées par timestamp descendant, avec le nom du nœud,
-    les valeurs numériques ET textuelles.
-    """
     with get_db() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
             SELECT 
-                n.name, 
-                n.node_id, 
-                n.category, 
-                n.unit,
-                m.value          AS numeric_value,
-                m.text_value     AS text_value,
-                m.timestamp,
-                m.timestamp      AS readable_time
+                n.name, n.node_id, n.category, n.unit,
+                m.value AS numeric_value, m.text_value,
+                m.timestamp, m.timestamp AS readable_time
             FROM measurements m
             JOIN nodes n ON m.node_id = n.id
             ORDER BY m.timestamp DESC
             LIMIT %s
         """, (limit,))
-        return cur.fetchall()
+        rows = cur.fetchall()
+        for row in rows:
+            row['timestamp'] = str(row['timestamp'])
+            row['readable_time'] = str(row['readable_time'])
+        return rows
 
-
-# ────────────────────────────────────────────────
-# Historique d'un nœud spécifique
-# ────────────────────────────────────────────────
 @app.get("/measurements/{node_id}", response_model=List[Dict])
 def get_measurements_by_node(node_id: int, limit: int = 100):
-    """
-    Retourne l'historique des mesures pour un node_id donné
-    (limité à N enregistrements, par défaut 100)
-    """
     with get_db() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
             SELECT 
-                m.id,
-                n.name,
-                n.node_id,
-                n.category,
-                n.unit,
-                m.value          AS numeric_value,
-                m.text_value     AS text_value,
-                m.timestamp,
-                m.timestamp      AS readable_time
+                m.id, n.name, n.node_id, n.category, n.unit,
+                m.value AS numeric_value, m.text_value,
+                m.timestamp, m.timestamp AS readable_time
             FROM measurements m
             JOIN nodes n ON m.node_id = n.id
             WHERE m.node_id = %s
             ORDER BY m.timestamp DESC
             LIMIT %s
         """, (node_id, limit))
-        
         rows = cur.fetchall()
         if not rows:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Aucune mesure trouvée pour le node_id {node_id}"
-            )
+            raise HTTPException(status_code=404, detail="No measurements found")
+        for row in rows:
+            row['timestamp'] = str(row['timestamp'])
+            row['readable_time'] = str(row['readable_time'])
         return rows
