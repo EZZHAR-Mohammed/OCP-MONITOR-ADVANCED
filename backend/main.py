@@ -8,6 +8,7 @@ from intelligence.stats_engine import StatsEngine
 from intelligence.anomaly_engine import detect_anomaly
 from intelligence.rules_engine import evaluate_rules
 from storage.db import Database
+from storage.mysql_storage import process_data as mysql_process
 
 
 def load_config(path: str = "config/opcua_config.json") -> dict:
@@ -35,8 +36,11 @@ def main():
         node_ids = [n["nodeid"] for n in nodes[:5]]
         gen = connector.read_realtime(node_ids, interval=2)
         stats_engine = StatsEngine()
-        db = Database()
-        db.init_db()
+        use_mysql = cfg.get("use_mysql", False)
+        db = None
+        if not use_mysql:
+            db = Database()
+            db.init_db()
         for _ in range(3):
             raw_batch = next(gen)
             normalized_batch = []
@@ -49,9 +53,12 @@ def main():
                 normalized_batch.append(normalized)
                 print(normalized)
 
-                # Persist measurement
+                # Persist measurement (MySQL or SQLite)
                 try:
-                    db.insert_measure(normalized)
+                    if use_mysql:
+                        mysql_process(normalized)
+                    else:
+                        db.insert_measure(normalized)
                 except Exception:
                     pass
 
