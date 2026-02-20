@@ -38,7 +38,7 @@ The system follows a modular architecture composed of:
 - FastAPI
 - WebSocket
 - XAMPP MYSQL
-- 
+- react (frontend)
 - 
 
 ---
@@ -71,6 +71,8 @@ The system follows a modular architecture composed of:
 
    ```bash
    python main.py
+
+   uvicorn api:app --reload
    ```
 
 ---
