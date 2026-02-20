@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from threading import Thread
 
 from connectors.opcua_connector import OPCUAConnector
@@ -47,10 +48,11 @@ def main():
         nodes = connector.browse_nodes(root, max_level=3)
         print(f"→ {len(nodes)} nœuds variables trouvés")
 
+        # On prend les 5 premiers nœuds (tu peux augmenter si tu veux)
         node_ids = [n["nodeid"] for n in nodes[:5]]
         print(f"→ Surveillance des nodes : {node_ids}")
 
-        gen = connector.read_realtime(node_ids, interval=2.0)
+        gen = connector.read_realtime(node_ids, interval=1.0)  # ← 1 seconde
 
         stats_engine = StatsEngine()
 
@@ -63,8 +65,10 @@ def main():
             db.init_db()
             print("→ SQLite activé comme fallback")
 
-        for cycle in range(1, 4):
-            print(f"\nCycle {cycle} ────────────────")
+        print("=== COLLECTE EN TEMPS RÉEL DÉMARRÉE (toutes les 1 seconde) ===")
+
+        # Boucle infinie
+        while True:
             raw_batch = next(gen)
             
             for item in raw_batch:
@@ -73,17 +77,17 @@ def main():
                 raw_name = item.get("name")
 
                 normalized = normalize_opcua_data(node_id, value, raw_name=raw_name)
-                print(f"  {normalized.name:<18} = {normalized.value!r}  ({type(normalized.value).__name__})")
 
+                # Persistance
                 if use_mysql:
                     mysql_process(normalized)
                 else:
                     try:
                         db.insert_measure(normalized)
-                        print(f"   → SQLite OK")
                     except Exception as e:
                         print(f"   → ÉCHEC SQLite : {type(e).__name__} → {e}")
 
+                # Stats, anomalies, alertes (optionnel)
                 stats = stats_engine.update(normalized)
                 if stats:
                     print(f"   stats → avg={stats['avg']:.3f}  min={stats['min']}  max={stats['max']}")
@@ -94,17 +98,14 @@ def main():
                 alerts = evaluate_rules(normalized)
                 for alert in alerts:
                     print(f"   🚨 {alert.severity} — {alert.message}")
-                    if db:
-                        try:
-                            db.insert_alert(alert)
-                        except Exception:
-                            pass
 
-        gen.close()
+            # Petite pause pour éviter surcharge CPU (facultatif)
+            time.sleep(0.1)
 
+    except KeyboardInterrupt:
+        print("\nArrêt manuel par l'utilisateur...")
     except Exception as e:
-        print(f"Erreur globale dans la boucle : {type(e).__name__} → {e}")
-
+        print(f"Erreur globale : {type(e).__name__} → {e}")
     finally:
         connector.disconnect()
         if db:
